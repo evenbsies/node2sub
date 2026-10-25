@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>节点转订阅地址</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #121212; color: #e0e0e0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.desc { color: #999; font-size: 13px; margin: 0 0 16px; }
+  label { display: block; font-size: 13px; color: #aaa; margin: 12px 0 4px; }
+  textarea, input[type="text"], input[type="password"], select {
+    width: 100%; background: #1e1e1e; border: 1px solid #333; border-radius: 8px;
+    color: #eee; padding: 10px; font-size: 14px; outline: none;
+  }
+  textarea { min-height: 180px; font-family: monospace; resize: vertical; }
+  input:focus, textarea:focus { border-color: #f6821f; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button {
+    background: #f6821f; color: #fff; border: none; border-radius: 8px;
+    padding: 12px; font-size: 15px; width: 100%; margin-top: 12px; cursor: pointer;
+  }
+  button.secondary { background: #2a2a2a; color: #ddd; border: 1px solid #444; }
+  button:disabled { opacity: 0.5; }
+  .fmt { display: flex; gap: 16px; margin-top: 4px; font-size: 14px; }
+  .fmt label { display: flex; align-items: center; gap: 6px; margin: 0; color: #ddd; }
+  #out { margin-top: 16px; word-break: break-all; }
+  #out a { color: #f6a04a; }
+  #out .box {
+    background: #1e1e1e; border: 1px solid #333; border-radius: 8px;
+    padding: 10px; font-size: 13px; white-space: pre-wrap; word-break: break-all; margin-top: 8px;
+  }
+  #msg { margin-top: 12px; font-size: 13px; color: #f6a04a; white-space: pre-wrap; }
+  #msg.err { color: #ff6b6b; }
+  #msg.ok { color: #69db7c; }
+  .note { font-size: 12px; color: #777; margin-top: 12px; line-height: 1.6; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #aaa; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>节点转订阅地址</h1>
+<p class="desc">贴入节点，选个格式，生成可直接订阅的链接。内容写进你自己的 GitHub 仓库，走 jsDelivr 分发，不经过任何第三方服务器。</p>
+
+<label>节点文本（每行一条，vless/trojan 链接或 IP:端口都行）</label>
+<textarea id="nodes" placeholder="vless://uuid@1.2.3.4:443?security=tls#备注&#10;1.2.3.4:8443#备注"></textarea>
+
+<label>订阅格式（覆盖目前主流客户端）</label>
+<select id="fmt">
+  <option value="plain">通用链接（明文）— V2RayN / NekoBox / Shadowrocket / v2rayNG / Hiddify</option>
+  <option value="base64">Base64 订阅 — 同上（标准订阅格式）</option>
+  <option value="clash">Clash YAML — Clash / Mihomo / Verge / Stash</option>
+  <option value="singbox">sing-box JSON — sing-box / SFI</option>
+  <option value="surge">Surge 配置 — Surge</option>
+  <option value="qx">Quantumult X 配置 — Quantumult X</option>
+  <option value="loon">Loon 配置 — Loon</option>
+</select>
+
+<label>GitHub 仓库（owner/repo）</label>
+<input type="text" id="repo" placeholder="evenbsies/cfprobe-sub">
+<div class="row">
+  <div>
+    <label>分支</label>
+    <input type="text" id="branch" placeholder="main">
+  </div>
+  <div>
+    <label>文件路径</label>
+    <input type="text" id="path" placeholder="sub.txt">
+  </div>
+</div>
+
+<label>GitHub Token（只需给这一个仓库 Contents 写权限的细粒度 token）</label>
+<input type="password" id="token" placeholder="github_pat_..." autocomplete="off">
+<label class="check"><input type="checkbox" id="remember" checked> 记住 Token（只存本浏览器 localStorage，不上传任何地方）</label>
+
+<button id="btnPublish">发布并生成订阅链接</button>
+<button id="btnLocal" class="secondary">只在本地转格式，不发布</button>
+
+<div id="msg"></div>
+<div id="out"></div>
+
+<p class="note">
+  说明：发布 = 调 GitHub Contents API 写文件（已存在则覆盖，需先读 SHA），返回的订阅链接是 https://cdn.jsdelivr.net/gh/仓库@分支/路径。<br>
+  链接本身拿到就能拉，这是订阅链接固有的；和公开粘贴服务的区别是文件在你自己仓库里。<br>
+  结构化格式（Clash / sing-box / Surge / Quantumult X / Loon）需要完整节点链接，纯 IP:端口行无协议信息会被跳过并计数提示；想转纯 IP 行，先用 CFProbe 的节点模式导出完整链接再贴过来。<br>
+  Surge / Quantumult X / Loon 不支持 vless / hysteria2 / tuic（按各软件文档协议范围映射），这类节点会被跳过并提示，不会静默丢失。<br>
+  jsDelivr 有缓存，刚发布后几分钟内可能还是旧内容。</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const msgEl = $('msg'), outEl = $('out');
+
+function setMsg(text, cls) {
+  msgEl.textContent = text;
+  msgEl.className = cls || '';
+}
+
+function b64encode(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+const FMT_PATH = { plain: 'sub.txt', base64: 'sub.txt', clash: 'clash.yaml', singbox: 'singbox.json', surge: 'surge.conf', qx: 'qx.conf', loon: 'loon.conf' };
+const FMT_NAME = { plain: '通用链接', base64: 'Base64订阅', clash: 'Clash', singbox: 'sing-box', surge: 'Surge', qx: 'Quantumult X', loon: 'Loon' };
+function skipNote(skipped) {
+  if (!skipped.length) return '';
+  return '；跳过 ' + skipped.length + ' 条（' + skipped.slice(0, 3).join('、') + (skipped.length > 3 ? '…' : '') + '）';
+}
+function buildContent() {
+  const raw = $('nodes').value.replace(/\r\n/g, '\n').trim();
+  if (!raw) { setMsg('先贴入节点文本', 'err'); return null; }
+  const fmt = $('fmt').value;
+  if (fmt === 'plain') return { content: raw + '\n', skipped: [] };
+  if (fmt === 'base64') return { content: b64encode(raw + '\n'), skipped: [] };
+  const parsed = parseNodes(raw);
+  const out = emitFormat(fmt, parsed.nodes);
+  const skipped = parsed.skipped.concat(out.skipped);
+  if (!out.content) { setMsg('没有可转换的节点（纯 IP:端口行无协议信息，已跳过）', 'err'); return null; }
+  return { content: out.content, skipped: skipped };
+}
+$('fmt').addEventListener('change', () => {
+  if (!$('path').value.trim()) $('path').value = FMT_PATH[$('fmt').value] || 'sub.txt';
+});
+
+function loadSaved() {
+  try {
+    $('repo').value = localStorage.getItem('n2s_repo') || '';
+    $('branch').value = localStorage.getItem('n2s_branch') || '';
+    $('path').value = localStorage.getItem('n2s_path') || '';
+    $('token').value = localStorage.getItem('n2s_token') || '';
+  } catch (e) {}
+}
+loadSaved();
+
+function saveFields() {
+  try {
+    if ($('remember').checked) {
+      localStorage.setItem('n2s_repo', $('repo').value.trim());
+      localStorage.setItem('n2s_branch', $('branch').value.trim());
+      localStorage.setItem('n2s_path', $('path').value.trim());
+      localStorage.setItem('n2s_token', $('token').value.trim());
+    } else {
+      localStorage.removeItem('n2s_token');
+    }
+  } catch (e) {}
+}
+
+function ghHeaders(token) {
+  return {
+    'Authorization': 'Bearer ' + token,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': 'application/json'
+  };
+}
+
+function encodeGhPath(path) {
+  return path.split('/').map(s => encodeURIComponent(s)).join('/');
+}
+
+// ---------------- 节点解析 ----------------
+function dec(str) {
+  try { return decodeURIComponent(str); } catch (e) { return str; }
+}
+function b64decodeSafe(str) {
+  try {
+    let s = str.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    return decodeURIComponent(escape(atob(s)));
+  } catch (e) { return null; }
+}
+function parseParams(qs) {
+  const o = {};
+  if (!qs) return o;
+  qs.split('&').forEach(p => {
+    const i = p.indexOf('=');
+    if (i >= 0) o[dec(p.slice(0, i))] = dec(p.slice(i + 1));
+    else if (p) o[p] = '';
+  });
+  return o;
+}
+function parseUserinfo(auth) {
+  const i = auth.indexOf(':');
+  if (i >= 0) return { user: dec(auth.slice(0, i)), pass: dec(auth.slice(i + 1)) };
+  return { user: dec(auth), pass: '' };
+}
+function parseSS(body, name) {
+  let main = body, query = '';
+  const q = body.indexOf('?');
+  if (q >= 0) { main = body.slice(0, q); query = body.slice(q + 1); }
+  const p = parseParams(query);
+  let server = '', port = 0, method = '', password = '';
+  if (!main.includes('@')) {
+    const d = b64decodeSafe(main);
+    if (d && d.includes('@')) {
+      const mm = d.match(/^(.*):(.*)@(.*):(\d+)$/);
+      if (mm) { method = mm[1]; password = mm[2]; server = mm[3]; port = parseInt(mm[4]) || 0; }
+    }
+    if (!method) return null;
+  } else {
+    const at = main.lastIndexOf('@');
+    const auth = main.slice(0, at), hp = main.slice(at + 1);
+    const c = hp.lastIndexOf(':');
+    if (c < 0) return null;
+    server = hp.slice(0, c); port = parseInt(hp.slice(c + 1)) || 0;
+    if (server.startsWith('[') && server.endsWith(']')) server = server.slice(1, -1);
+    if (auth.includes(':')) {
+      const i = auth.indexOf(':');
+      method = dec(auth.slice(0, i)); password = dec(auth.slice(i + 1));
+    } else {
+      const d = b64decodeSafe(auth);
+      if (d && d.includes(':')) {
+        const i = d.indexOf(':');
+        method = d.slice(0, i); password = d.slice(i + 1);
+      } else return null;
+    }
+  }
+  return { type: 'ss', name, server, port, method, password, plugin: p.plugin || '',
+    tls: false, insecure: false, sni: '', net: 'tcp', host: '', path: '', grpcService: '' };
+}
+function parseNodeLine(line) {
+  const h = line.lastIndexOf('#');
+  const body = h >= 0 ? line.slice(0, h) : line;
+  const name = h >= 0 ? dec(line.slice(h + 1)) : '';
+  const m = body.match(/^([a-z0-9+.-]+):\/\/(.*)$/i);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  const rest = m[2];
+  if (scheme === 'vmess') {
+    let j;
+    try { j = JSON.parse(b64decodeSafe(rest)); } catch (e) { return null; }
+    if (!j) return null;
+    return { type: 'vmess', name: name || j.ps || '', server: j.add || '', port: parseInt(j.port) || 0,
+      uuid: j.id || '', alterId: parseInt(j.aid) || 0, cipher: j.scy || 'auto',
+      net: j.net || 'tcp', tls: j.tls === 'tls', sni: j.sni || j.host || '',
+      host: j.host || '', path: j.path || '', grpcService: j.path || '',
+      insecure: false };
+  }
+  if (scheme === 'ss' || scheme === 'shadowsocks') return parseSS(rest, name);
+  let main = rest, query = '';
+  const q = rest.indexOf('?');
+  if (q >= 0) { main = rest.slice(0, q); query = rest.slice(q + 1); }
+  const p = parseParams(query);
+  const at = main.lastIndexOf('@');
+  let auth = '', hp = main;
+  if (at >= 0) { auth = main.slice(0, at); hp = main.slice(at + 1); }
+  const c = hp.lastIndexOf(':');
+  if (c < 0) return null;
+  let server = hp.slice(0, c);
+  const port = parseInt(hp.slice(c + 1)) || 0;
+  if (server.startsWith('[') && server.endsWith(']')) server = server.slice(1, -1);
+  const up = parseUserinfo(auth);
+  const tls = p.security === 'tls' || p.tls === '1' || p.tls === 'true';
+  const insecure = p.insecure === '1' || p.allowInsecure === '1' || p['skip-cert-verify'] === '1';
+  const base = { name, server, port, tls, insecure,
+    sni: p.sni || p.peer || '', net: p.type || 'tcp',
+    host: p.host || '', path: p.path || '', grpcService: p.serviceName || '' };
+  if (scheme === 'vless') return Object.assign({ type: 'vless', uuid: up.user, flow: p.flow || '' }, base);
+  if (scheme === 'trojan') return Object.assign({ type: 'trojan', password: up.user }, base);
+  if (scheme === 'socks5' || scheme === 'socks') return Object.assign({ type: 'socks5', username: up.user, password: up.pass }, base);
+  if (scheme === 'http') return Object.assign({ type: 'http', username: up.user, password: up.pass }, base);
+  if (scheme === 'hysteria2' || scheme === 'hy2') return Object.assign({ type: 'hysteria2', password: up.user,
+    obfs: p.obfs || '', obfsPassword: p['obfs-password'] || '' }, base);
+  if (scheme === 'tuic') return Object.assign({ type: 'tuic', uuid: up.user, password: up.pass,
+    congestion: p.congestion_control || '', udpRelay: p.udp_relay_mode || '', alpn: p.alpn || '' }, base);
+  return null;
+}
+function parseNodes(raw) {
+  const nodes = [], skipped = [];
+  raw.split('\n').forEach((lineRaw, idx) => {
+    const line = lineRaw.trim();
+    if (!line) return;
+    const node = parseNodeLine(line);
+    if (node) nodes.push(node);
+    else skipped.push('第' + (idx + 1) + '行无法识别，已跳过');
+  });
+  return { nodes, skipped };
+}
+function dedupNames(nodes) {
+  const seen = {};
+  nodes.forEach(n => {
+    let nm = n.name || (n.server + ':' + n.port);
+    if (seen[nm]) { let k = 2; while (seen[nm + '-' + k]) k++; nm = nm + '-' + k; }
+    seen[nm] = 1;
+    n.name = nm;
+  });
+}
+function emitFormat(fmt, nodes) {
+  if (fmt === 'clash') return emitClash(nodes);
+  if (fmt === 'singbox') return emitSingbox(nodes);
+  if (fmt === 'surge') return emitSurge(nodes);
+  if (fmt === 'qx') return emitQx(nodes);
+  if (fmt === 'loon') return emitLoon(nodes);
+  return { content: '', skipped: ['未知格式'] };
+}
+// ---------------- Clash ----------------
+function clashWsGrpc(n, L) {
+  if (n.net === 'ws') {
+    L.push('    network: ws');
+    L.push('    ws-opts:');
+    L.push('      path: ' + JSON.stringify(n.path || '/'));
+    if (n.host) L.push('      headers: {Host: ' + JSON.stringify(n.host) + '}');
+  } else if (n.net === 'grpc') {
+    L.push('    network: grpc');
+    L.push('    grpc-opts:');
+    L.push('      grpc-service-name: ' + JSON.stringify(n.grpcService));
+  }
+}
+function clashTls(n, L) {
+  if (n.tls) {
+    L.push('    tls: true');
+    if (n.sni) L.push('    servername: ' + JSON.stringify(n.sni));
+    if (n.insecure) L.push('    skip-cert-verify: true');
+  }
+}
+function clashProxy(n) {
+  const q = v => JSON.stringify(String(v));
+  const L = [];
+  L.push('  - name: ' + q(n.name));
+  L.push('    type: ' + n.type);
+  L.push('    server: ' + q(n.server));
+  L.push('    port: ' + n.port);
+  if (n.type === 'vless') {
+    L.push('    uuid: ' + q(n.uuid));
+    if (n.flow) L.push('    flow: ' + q(n.flow));
+    clashTls(n, L); clashWsGrpc(n, L);
+  } else if (n.type === 'vmess') {
+    L.push('    uuid: ' + q(n.uuid));
+    L.push('    alterId: ' + n.alterId);
+    L.push('    cipher: ' + q(n.cipher));
+    clashTls(n, L); clashWsGrpc(n, L);
+  } else if (n.type === 'trojan') {
+    L.push('    password: ' + q(n.password));
+    if (n.sni) L.push('    sni: ' + q(n.sni));
+    if (n.insecure) L.push('    skip-cert-verify: true');
+    clashWsGrpc(n, L);
+  } else if (n.type === 'ss') {
+    L.push('    cipher: ' + q(n.method));
+    L.push('    password: ' + q(n.password));
+    if (n.plugin) {
+      const parts = n.plugin.split(';');
+      L.push('    plugin: ' + q(parts[0]));
+      if (parts.length > 1) {
+        L.push('    plugin-opts:');
+        parts.slice(1).forEach(kv => {
+          const i = kv.indexOf('=');
+          if (i >= 0) L.push('      ' + kv.slice(0, i) + ': ' + q(kv.slice(i + 1)));
+        });
+      }
+    }
+  } else if (n.type === 'socks5') {
+    if (n.username) L.push('    username: ' + q(n.username));
+    if (n.password) L.push('    password: ' + q(n.password));
+    clashTls(n, L);
+  } else if (n.type === 'http') {
+    if (n.username) L.push('    username: ' + q(n.username));
+    if (n.password) L.push('    password: ' + q(n.password));
+    if (n.tls) L.push('    tls: true');
+  } else if (n.type === 'hysteria2') {
+    L.push('    password: ' + q(n.password));
+    if (n.sni) L.push('    sni: ' + q(n.sni));
+    if (n.insecure) L.push('    skip-cert-verify: true');
+    if (n.obfs) {
+      L.push('    obfs: ' + q(n.obfs));
+      if (n.obfsPassword) L.push('    obfs-password: ' + q(n.obfsPassword));
+    }
+  } else if (n.type === 'tuic') {
+    L.push('    uuid: ' + q(n.uuid));
+    L.push('    password: ' + q(n.password));
+    if (n.sni) L.push('    sni: ' + q(n.sni));
+    if (n.alpn) L.push('    alpn: [' + n.alpn.split(',').map(x => q(x.trim())).join(', ') + ']');
+    if (n.congestion) L.push('    congestion-controller: ' + q(n.congestion));
+    if (n.udpRelay) L.push('    udp-relay-mode: ' + q(n.udpRelay));
+    if (n.insecure) L.push('    skip-cert-verify: true');
+  }
+  return L.join('\n');
+}
+function emitClash(nodes) {
+  const ok = [], skipped = [];
+  const TYPES = ['vless', 'vmess', 'trojan', 'ss', 'socks5', 'http', 'hysteria2', 'tuic'];
+  nodes.forEach(n => {
+    if (TYPES.includes(n.type)) ok.push(n);
+    else skipped.push('Clash 不支持：' + (n.name || n.server));
+  });
+  if (!ok.length) return { content: '', skipped };
+  dedupNames(ok);
+  let y = 'port: 7890\nsocks-port: 7891\nallow-lan: false\nmode: rule\nlog-level: info\nproxies:\n';
+  y += ok.map(clashProxy).join('\n') + '\n';
+  y += 'proxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n';
+  y += ok.map(n => '      - ' + JSON.stringify(n.name)).join('\n') + '\n';
+  y += 'rules:\n  - MATCH,PROXY\n';
+  return { content: y, skipped };
+}
+// ---------------- sing-box ----------------
+function sbTls(n) {
+  if (!n.tls && n.type !== 'hysteria2' && n.type !== 'tuic') return undefined;
+  const t = { enabled: true };
+  if (n.sni) t.server_name = n.sni;
+  if (n.insecure) t.insecure = true;
+  return t;
+}
+function sbTransport(n) {
+  if (n.net === 'ws') {
+    const t = { type: 'ws', path: n.path || '/' };
+    if (n.host) t.headers = { Host: n.host };
+    return t;
+  }
+  if (n.net === 'grpc') return { type: 'grpc', service_name: n.grpcService };
+  return undefined;
+}
+function sbOutbound(n) {
+  const o = { tag: n.name, server: n.server, server_port: n.port };
+  if (n.type === 'vless') { o.type = 'vless'; o.uuid = n.uuid; if (n.flow) o.flow = n.flow; }
+  else if (n.type === 'vmess') { o.type = 'vmess'; o.uuid = n.uuid; o.security = n.cipher; o.alter_id = n.alterId; }
+  else if (n.type === 'trojan') { o.type = 'trojan'; o.password = n.password; }
+  else if (n.type === 'ss') { o.type = 'shadowsocks'; o.method = n.method; o.password = n.password; }
+  else if (n.type === 'socks5') { o.type = 'socks'; o.version = '5'; if (n.username) o.username = n.username; if (n.password) o.password = n.password; }
+  else if (n.type === 'http') { o.type = 'http'; if (n.username) o.username = n.username; if (n.password) o.password = n.password; }
+  else if (n.type === 'hysteria2') { o.type = 'hysteria2'; o.password = n.password; if (n.obfs) o.obfs = { type: n.obfs, password: n.obfsPassword || '' }; }
+  else if (n.type === 'tuic') { o.type = 'tuic'; o.uuid = n.uuid; o.password = n.password; if (n.congestion) o.congestion_control = n.congestion; if (n.udpRelay) o.udp_relay_mode = n.udpRelay; }
+  else return null;
+  const tls = sbTls(n);
+  if (tls) o.tls = tls;
+  const tr = sbTransport(n);
+  if (tr) o.transport = tr;
+  return o;
+}
+function emitSingbox(nodes) {
+  const outs = [], skipped = [], names = [];
+  nodes.forEach(n => {
+    const o = sbOutbound(n);
+    if (!o) { skipped.push('sing-box 不支持：' + (n.name || n.server)); return; }
+    let tag = o.tag, k = 2;
+    while (names.includes(tag)) tag = o.tag + '-' + (k++);
+    o.tag = tag; names.push(tag);
+    outs.push(o);
+  });
+  if (!outs.length) return { content: '', skipped };
+  const cfg = {
+    log: { level: 'info' },
+    inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }],
+    outbounds: [{ type: 'selector', tag: 'proxy', outbounds: names.concat(['direct']) }].concat(outs).concat([{ type: 'direct', tag: 'direct' }]),
+    route: { final: 'proxy' }
+  };
+  return { content: JSON.stringify(cfg, null, 2) + '\n', skipped };
+}
+// ---------------- Surge / Quantumult X / Loon ----------------
+function cleanName(n) {
+  return (n.name || (n.server + ':' + n.port)).replace(/[,\n=\r]/g, '-').trim();
+}
+function surgeLine(n) {
+  const nm = cleanName(n);
+  const kv = [];
+  if (n.username) kv.push('username=' + n.username);
+  if (n.password) kv.push('password=' + n.password);
+  if (n.type === 'vmess') {
+    let s = nm + ' = vmess, ' + n.server + ', ' + n.port + ', username=' + n.uuid;
+    if (n.net === 'ws') { s += ', ws=true, ws-path=' + (n.path || '/'); if (n.host) s += ', ws-headers=Host:' + n.host; }
+    if (n.tls) { s += ', tls=true'; if (n.sni) s += ', sni=' + n.sni; if (n.insecure) s += ', skip-cert-verify=true'; }
+    return s;
+  }
+  if (n.type === 'trojan') {
+    let s = nm + ' = trojan, ' + n.server + ', ' + n.port + ', password=' + n.password;
+    if (n.net === 'ws') { s += ', ws=true, ws-path=' + (n.path || '/'); if (n.host) s += ', ws-headers=Host:' + n.host; }
+    s += ', tls=true';
+    if (n.sni) s += ', sni=' + n.sni;
+    if (n.insecure) s += ', skip-cert-verify=true';
+    return s;
+  }
+  if (n.type === 'ss') return nm + ' = ss, ' + n.server + ', ' + n.port + ', encrypt-method=' + n.method + ', password=' + n.password;
+  if (n.type === 'socks5') return nm + ' = socks5, ' + n.server + ', ' + n.port + (kv.length ? ', ' + kv.join(', ') : '');
+  if (n.type === 'http') return nm + ' = http, ' + n.server + ', ' + n.port + (kv.length ? ', ' + kv.join(', ') : '');
+  return null;
+}
+function emitSurge(nodes) {
+  const lines = [], skipped = [], names = [];
+  nodes.forEach(n => {
+    const l = surgeLine(n);
+    if (!l) { skipped.push('Surge 不支持：' + (n.name || n.server)); return; }
+    let nm = cleanName(n), k = 2;
+    while (names.includes(nm)) nm = cleanName(n) + '-' + (k++);
+    names.push(nm);
+    lines.push(l.replace(/^[^=]+(?= = )/, nm));
+  });
+  if (!lines.length) return { content: '', skipped };
+  return { content: '[General]\nloglevel = notify\n[Proxy]\n' + lines.join('\n') +
+    '\n[Proxy Group]\nPROXY = select, ' + names.join(', ') + '\n[Rule]\nFINAL,PROXY\n', skipped };
+}
+function qxLine(n) {
+  const nm = cleanName(n);
+  if (n.type === 'vmess') {
+    let s = 'vmess=' + n.server + ':' + n.port + ', method=' + (n.cipher === 'auto' ? 'none' : n.cipher) + ', password=' + n.uuid;
+    if (n.net === 'ws') { s += ', obfs=' + (n.tls ? 'wss' : 'ws'); if (n.host) s += ', obfs-host=' + n.host; if (n.path) s += ', obfs-uri=' + n.path; }
+    if (n.tls && !n.insecure) s += ', tls-verification=true';
+    if (n.tls && n.insecure) s += ', tls-verification=false';
+    return s + ', tag=' + nm;
+  }
+  if (n.type === 'trojan') {
+    let s = 'trojan=' + n.server + ':' + n.port + ', password=' + n.password + ', over-tls=true';
+    if (n.sni) s += ', tls-host=' + n.sni;
+    s += n.insecure ? ', tls-verification=false' : ', tls-verification=true';
+    return s + ', tag=' + nm;
+  }
+  if (n.type === 'ss') {
+    let s = 'shadowsocks=' + n.server + ':' + n.port + ', method=' + n.method + ', password=' + n.password;
+    if (n.plugin) {
+      const parts = n.plugin.split(';');
+      parts.slice(1).forEach(kv => {
+        const i = kv.indexOf('=');
+        if (i >= 0) {
+          const k = kv.slice(0, i), v = kv.slice(i + 1);
+          if (k === 'obfs') s += ', obfs=' + v;
+          if (k === 'obfs-host') s += ', obfs-host=' + v;
+        }
+      });
+    }
+    return s + ', udp-relay=true, tag=' + nm;
+  }
+  if (n.type === 'socks5') {
+    let s = 'socks5=' + n.server + ':' + n.port;
+    if (n.username) s += ', username=' + n.username;
+    if (n.password) s += ', password=' + n.password;
+    return s + ', tag=' + nm;
+  }
+  if (n.type === 'http') {
+    let s = 'http=' + n.server + ':' + n.port;
+    if (n.username) s += ', username=' + n.username;
+    if (n.password) s += ', password=' + n.password;
+    return s + ', tag=' + nm;
+  }
+  return null;
+}
+function emitQx(nodes) {
+  const lines = [], skipped = [];
+  nodes.forEach(n => {
+    const l = qxLine(n);
+    if (!l) { skipped.push('Quantumult X 不支持：' + (n.name || n.server)); return; }
+    lines.push(l);
+  });
+  if (!lines.length) return { content: '', skipped };
+  const tags = lines.map(l => { const m = l.match(/tag=(.*)$/); return m ? m[1] : ''; }).filter(Boolean);
+  return { content: '[server_local]\n' + lines.join('\n') +
+    '\n[policy]\nPROXY = select, ' + tags.join(', ') + '\n', skipped };
+}
+function loonLine(n) {
+  const nm = cleanName(n);
+  if (n.type === 'vless') {
+    let s = nm + ' = vless, ' + n.server + ', ' + n.port + ', username=' + n.uuid;
+    if (n.flow) s += ', flow=' + n.flow;
+    if (n.net === 'ws') { s += ', ws=true, ws-path=' + (n.path || '/'); if (n.host) s += ', ws-headers=Host:' + n.host; }
+    if (n.tls) { s += ', tls=true'; if (n.sni) s += ', sni=' + n.sni; if (n.insecure) s += ', skip-cert-verify=true'; }
+    return s;
+  }
+  if (n.type === 'vmess') {
+    let s = nm + ' = vmess, ' + n.server + ', ' + n.port + ', username=' + n.uuid;
+    if (n.net === 'ws') { s += ', ws=true, ws-path=' + (n.path || '/'); if (n.host) s += ', ws-headers=Host:' + n.host; }
+    if (n.tls) { s += ', tls=true'; if (n.sni) s += ', sni=' + n.sni; if (n.insecure) s += ', skip-cert-verify=true'; }
+    return s;
+  }
+  if (n.type === 'trojan') {
+    let s = nm + ' = trojan, ' + n.server + ', ' + n.port + ', password=' + n.password;
+    if (n.net === 'ws') { s += ', ws=true, ws-path=' + (n.path || '/'); if (n.host) s += ', ws-headers=Host:' + n.host; }
+    s += ', tls=true';
+    if (n.sni) s += ', sni=' + n.sni;
+    if (n.insecure) s += ', skip-cert-verify=true';
+    return s;
+  }
+  if (n.type === 'ss') return nm + ' = ss, ' + n.server + ', ' + n.port + ', encrypt-method=' + n.method + ', password=' + n.password;
+  if (n.type === 'socks5') {
+    let s = nm + ' = socks5, ' + n.server + ', ' + n.port;
+    if (n.username) s += ', username=' + n.username;
+    if (n.password) s += ', password=' + n.password;
+    return s;
+  }
+  if (n.type === 'http') {
+    let s = nm + ' = http, ' + n.server + ', ' + n.port;
+    if (n.username) s += ', username=' + n.username;
+    if (n.password) s += ', password=' + n.password;
+    return s;
+  }
+  return null;
+}
+function emitLoon(nodes) {
+  const lines = [], skipped = [], names = [];
+  nodes.forEach(n => {
+    const l = loonLine(n);
+    if (!l) { skipped.push('Loon 不支持：' + (n.name || n.server)); return; }
+    let nm = cleanName(n), k = 2;
+    while (names.includes(nm)) nm = cleanName(n) + '-' + (k++);
+    names.push(nm);
+    lines.push(l.replace(/^[^=]+(?= = )/, nm));
+  });
+  if (!lines.length) return { content: '', skipped };
+  return { content: '[General]\n[Proxy]\n' + lines.join('\n') +
+    '\n[Proxy Group]\nPROXY = select, ' + names.join(', ') + '\n[Rule]\nFINAL,PROXY\n', skipped };
+}
+
+
+$('btnLocal').addEventListener('click', () => {
+  const res = buildContent();
+  if (res === null) return;
+  const content = res.content;
+  outEl.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'box';
+  div.textContent = content;
+  outEl.appendChild(div);
+  const cp = document.createElement('button');
+  cp.className = 'secondary';
+  cp.textContent = '复制订阅内容';
+  cp.addEventListener('click', () => {
+    navigator.clipboard.writeText(content).then(() => setMsg('已复制', 'ok'));
+  });
+  outEl.appendChild(cp);
+  setMsg('本地转换完成（未发布）' + skipNote(res.skipped), res.skipped.length ? '' : 'ok');
+});
+
+$('btnPublish').addEventListener('click', async () => {
+  const res = buildContent();
+  if (res === null) return;
+  const content = res.content;
+  const repo = $('repo').value.trim();
+  const branch = $('branch').value.trim() || 'main';
+  const path = $('path').value.trim();
+  const token = $('token').value.trim();
+  if (!repo || !repo.includes('/')) { setMsg('仓库格式不对，应为 owner/repo', 'err'); return; }
+  if (!path) { setMsg('填一下文件路径，如 sub.txt', 'err'); return; }
+  if (!token) { setMsg('填一下 GitHub Token', 'err'); return; }
+  saveFields();
+  const btn = $('btnPublish');
+  btn.disabled = true;
+  setMsg('正在发布…', '');
+  outEl.innerHTML = '';
+  try {
+    const api = 'https://api.github.com/repos/' + repo + '/contents/' + encodeGhPath(path);
+    let sha = null;
+    const getRes = await fetch(api + '?ref=' + encodeURIComponent(branch), { headers: ghHeaders(token) });
+    if (getRes.status === 200) {
+      const j = await getRes.json();
+      sha = j.sha;
+    } else if (getRes.status !== 404) {
+      throw new Error('读取文件失败：' + getRes.status + ' ' + (await getRes.text()).slice(0, 200));
+    }
+    const body = {
+      message: 'node2sub export ' + new Date().toISOString().slice(0, 16).replace('T', ' '),
+      content: b64encode(content),
+      branch: branch
+    };
+    if (sha) body.sha = sha;
+    const putRes = await fetch(api, {
+      method: 'PUT',
+      headers: ghHeaders(token),
+      body: JSON.stringify(body)
+    });
+    if (putRes.status !== 200 && putRes.status !== 201) {
+      throw new Error('推送失败：' + putRes.status + ' ' + (await putRes.text()).slice(0, 300));
+    }
+    const sub = 'https://cdn.jsdelivr.net/gh/' + repo + '@' + branch + '/' + path;
+    setMsg('发布成功' + skipNote(res.skipped), 'ok');
+    outEl.innerHTML = '';
+    const a = document.createElement('a');
+    a.href = sub; a.textContent = sub; a.target = '_blank'; a.rel = 'noopener';
+    outEl.appendChild(a);
+    const cp = document.createElement('button');
+    cp.textContent = '复制订阅链接';
+    cp.addEventListener('click', () => {
+      navigator.clipboard.writeText(sub).then(() => setMsg('已复制订阅链接', 'ok'));
+    });
+    outEl.appendChild(cp);
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = 'jsDelivr 有缓存，刚发布后几分钟内可能还是旧内容；等一会儿或在链接后加 ?t=时间戳可绕缓存（部分客户端不支持带参订阅）。';
+    outEl.appendChild(note);
+  } catch (e) {
+    setMsg('失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

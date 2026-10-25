@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>节点转订阅地址</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #121212; color: #e0e0e0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.desc { color: #999; font-size: 13px; margin: 0 0 16px; }
+  label { display: block; font-size: 13px; color: #aaa; margin: 12px 0 4px; }
+  textarea, input[type="text"], input[type="password"], select {
+    width: 100%; background: #1e1e1e; border: 1px solid #333; border-radius: 8px;
+    color: #eee; padding: 10px; font-size: 14px; outline: none;
+  }
+  textarea { min-height: 180px; font-family: monospace; resize: vertical; }
+  input:focus, textarea:focus { border-color: #f6821f; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button {
+    background: #f6821f; color: #fff; border: none; border-radius: 8px;
+    padding: 12px; font-size: 15px; width: 100%; margin-top: 12px; cursor: pointer;
+  }
+  button.secondary { background: #2a2a2a; color: #ddd; border: 1px solid #444; }
+  button:disabled { opacity: 0.5; }
+  .fmt { display: flex; gap: 16px; margin-top: 4px; font-size: 14px; }
+  .fmt label { display: flex; align-items: center; gap: 6px; margin: 0; color: #ddd; }
+  #out { margin-top: 16px; word-break: break-all; }
+  #out a { color: #f6a04a; }
+  #out .box {
+    background: #1e1e1e; border: 1px solid #333; border-radius: 8px;
+    padding: 10px; font-size: 13px; white-space: pre-wrap; word-break: break-all; margin-top: 8px;
+  }
+  #msg { margin-top: 12px; font-size: 13px; color: #f6a04a; white-space: pre-wrap; }
+  #msg.err { color: #ff6b6b; }
+  #msg.ok { color: #69db7c; }
+  .note { font-size: 12px; color: #777; margin-top: 12px; line-height: 1.6; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #aaa; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>节点转订阅地址</h1>
+<p class="desc">贴入节点，立马生成一条自适应订阅地址：不用选软件，转换服务按客户端身份实时返回对应格式（Clash / sing-box / Surge / Quantumult X / Loon / 通用链接）。节点文件仍写进你自己的 GitHub 仓库，不经过任何第三方服务器。</p>
+
+<label>节点文本（每行一条，vless/trojan 链接或 IP:端口都行）</label>
+<textarea id="nodes" placeholder="vless://uuid@1.2.3.4:443?security=tls#备注&#10;1.2.3.4:8443#备注"></textarea>
+
+<label>转换服务地址（自适应订阅的后端，部署见 server/ 目录，如 http://你的服务器:18081/sub）</label>
+<input type="text" id="converter" placeholder="https://你的转换服务/sub">
+
+<label>GitHub 仓库（owner/repo）</label>
+<input type="text" id="repo" placeholder="evenbsies/cfprobe-sub">
+<div class="row">
+  <div>
+    <label>分支</label>
+    <input type="text" id="branch" placeholder="main">
+  </div>
+  <div>
+    <label>文件路径</label>
+    <input type="text" id="path" placeholder="sub.txt">
+  </div>
+</div>
+
+<label>GitHub Token（只需给这一个仓库 Contents 写权限的细粒度 token）</label>
+<input type="password" id="token" placeholder="github_pat_..." autocomplete="off">
+<label class="check"><input type="checkbox" id="remember" checked> 记住 Token（只存本浏览器 localStorage，不上传任何地方）</label>
+
+<button id="btnPublish">生成自适应订阅地址</button>
+
+<div id="msg"></div>
+<div id="out"></div>
+
+<p class="note">
+  说明：发布 = 调 GitHub Contents API 写文件（已存在则覆盖，需先读 SHA），节点文件仍在你自己仓库里。<br>
+  自适应原理：单个静态文件没法按客户端变格式，所以多了一个转换服务（server/ 目录，无状态，不存节点）：客户端拿着这条链接来拉时，服务按 User-Agent 识别身份——Clash/Mihomo/Stash 给 Clash YAML，sing-box 给 sing-box JSON，Surge / Quantumult X / Loon 各给自家配置，其他一律给 Base64 订阅；链接后加 &amp;target= 也可强制指定格式。<br>
+  链接本身拿到就能拉，这是订阅链接固有的；和公开粘贴服务的区别是文件在你自己仓库里，转换服务也由你自己部署。<br>
+  jsDelivr 有缓存，刚发布后几分钟内可能还是旧内容。</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const msgEl = $('msg'), outEl = $('out');
+
+function setMsg(text, cls) {
+  msgEl.textContent = text;
+  msgEl.className = cls || '';
+}
+
+function b64encode(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+function rawNodes() {
+  const raw = $('nodes').value.replace(/\r\n/g, '\n').trim();
+  if (!raw) { setMsg('先贴入节点文本', 'err'); return null; }
+  return raw + '\n';
+}
+
+function loadSaved() {
+  try {
+    $('repo').value = localStorage.getItem('n2s_repo') || '';
+    $('branch').value = localStorage.getItem('n2s_branch') || '';
+    $('path').value = localStorage.getItem('n2s_path') || '';
+    $('token').value = localStorage.getItem('n2s_token') || '';
+    $('converter').value = localStorage.getItem('n2s_converter') || '';
+    if (!$('converter').value && location.protocol.startsWith('http') && !location.hostname.endsWith('github.io')) {
+      $('converter').value = location.origin + '/sub';
+    }
+  } catch (e) {}
+}
+loadSaved();
+
+function saveFields() {
+  try {
+    if ($('remember').checked) {
+      localStorage.setItem('n2s_repo', $('repo').value.trim());
+      localStorage.setItem('n2s_branch', $('branch').value.trim());
+      localStorage.setItem('n2s_path', $('path').value.trim());
+      localStorage.setItem('n2s_token', $('token').value.trim());
+      localStorage.setItem('n2s_converter', $('converter').value.trim());
+    } else {
+      localStorage.removeItem('n2s_token');
+    }
+  } catch (e) {}
+}
+
+function ghHeaders(token) {
+  return {
+    'Authorization': 'Bearer ' + token,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': 'application/json'
+  };
+}
+
+function encodeGhPath(path) {
+  return path.split('/').map(s => encodeURIComponent(s)).join('/');
+}
+
+$('btnPublish').addEventListener('click', async () => {
+  const content = rawNodes();
+  if (content === null) return;
+  const repo = $('repo').value.trim();
+  const branch = $('branch').value.trim() || 'main';
+  const path = $('path').value.trim();
+  const token = $('token').value.trim();
+  if (!repo || !repo.includes('/')) { setMsg('仓库格式不对，应为 owner/repo', 'err'); return; }
+  if (!path) { setMsg('填一下文件路径，如 sub.txt', 'err'); return; }
+  if (!token) { setMsg('填一下 GitHub Token', 'err'); return; }
+  saveFields();
+  const btn = $('btnPublish');
+  btn.disabled = true;
+  setMsg('正在发布…', '');
+  outEl.innerHTML = '';
+  try {
+    const api = 'https://api.github.com/repos/' + repo + '/contents/' + encodeGhPath(path);
+    let sha = null;
+    const getRes = await fetch(api + '?ref=' + encodeURIComponent(branch), { headers: ghHeaders(token) });
+    if (getRes.status === 200) {
+      const j = await getRes.json();
+      sha = j.sha;
+    } else if (getRes.status !== 404) {
+      throw new Error('读取文件失败：' + getRes.status + ' ' + (await getRes.text()).slice(0, 200));
+    }
+    const body = {
+      message: 'node2sub export ' + new Date().toISOString().slice(0, 16).replace('T', ' '),
+      content: b64encode(content),
+      branch: branch
+    };
+    if (sha) body.sha = sha;
+    const putRes = await fetch(api, {
+      method: 'PUT',
+      headers: ghHeaders(token),
+      body: JSON.stringify(body)
+    });
+    if (putRes.status !== 200 && putRes.status !== 201) {
+      throw new Error('推送失败：' + putRes.status + ' ' + (await putRes.text()).slice(0, 300));
+    }
+    const fileUrl = 'https://cdn.jsdelivr.net/gh/' + repo + '@' + branch + '/' + path;
+    const conv = $('converter').value.trim().replace(/\/$/, '');
+    const sub = conv ? conv + '/sub?src=' + encodeURIComponent(fileUrl) : fileUrl;
+    setMsg('发布成功', 'ok');
+    outEl.innerHTML = '';
+    const a = document.createElement('a');
+    a.href = sub; a.textContent = sub; a.target = '_blank'; a.rel = 'noopener';
+    outEl.appendChild(a);
+    const cp = document.createElement('button');
+    cp.textContent = '复制订阅链接';
+    cp.addEventListener('click', () => {
+      navigator.clipboard.writeText(sub).then(() => setMsg('已复制订阅链接', 'ok'));
+    });
+    outEl.appendChild(cp);
+    if (conv) {
+      const f = document.createElement('p');
+      f.className = 'note';
+      f.textContent = '节点文件地址：' + fileUrl;
+      outEl.appendChild(f);
+    }
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = conv
+      ? '这条就是自适应订阅地址：不用选软件，转换服务按客户端身份实时返回对应格式；也可直接在链接后加 &target=clash|singbox|surge|qx|loon|plain|base64 强制指定格式。jsDelivr 有缓存，刚发布后几分钟内可能还是旧内容。'
+      : '未填转换服务地址，上面是节点文件直链；填入转换服务地址（部署见 server/ 目录）后重新生成，即可得到自适应链接。';
+    outEl.appendChild(note);
+  } catch (e) {
+    setMsg('失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
